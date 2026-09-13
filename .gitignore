@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.eggs/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv
+venv/
+env/
+
+
+# --- Environment secrets ----------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Data / warehouse ----------------------------------------------------------
+data/synthetic/*.csv
