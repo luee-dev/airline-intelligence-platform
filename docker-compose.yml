@@ -1,0 +1,66 @@
+# ============================================================================
+# Local, fully open-source stack for the Airline Intelligence Platform.
+#
+# `docker compose up` gives you:
+#   - postgres  : the analytical warehouse (star schema)
+#   - pgadmin   : optional web UI to browse the warehouse (http://localhost:5050)
+#   - api       : the FastAPI data product (http://localhost:8000/docs)
+#
+# This is deliberately built on vanilla, self-hostable open-source images so
+# it runs identically on a laptop, in CI, or in any cloud that can run
+# containers. See README.md -> "From local Docker to the cloud" for how each
+# service maps onto a managed equivalent (RDS/Cloud SQL, ECS/Cloud Run, etc.)
+# without changing a line of application code.
+# ============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: airline_postgres
+    environment:
+      POSTGRES_USER: airline
+      POSTGRES_PASSWORD: airline
+      POSTGRES_DB: airline
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./src/database/views.sql:/docker-entrypoint-initdb.d/02_views.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airline -d airline"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: airline_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["ui"]   # only started with `docker compose --profile ui up`
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: airline_api
+    environment:
+      DATABASE_URL: postgresql+psycopg2://airline:airline@postgres:5432/airline
+      AIRLINE_DB_PATH: /app/data/processed/airline.db
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  pgdata:
