@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn sqlalchemy fastapi uvicorn pydantic \
+                      pytest pytest-cov ruff black
+
+      - name: Lint (ruff)
+        run: ruff check src/ tests/
+        continue-on-error: true   # style nits shouldn't block CI; functional tests are the real gate
+
+      - name: Check formatting (black)
+        run: black --check src/ tests/
+        continue-on-error: true
+
+      - name: Run unit tests
+        run: pytest tests/ -v --cov=src --cov-report=term-missing
+
+      - name: Smoke-test the end-to-end pipeline
+        run: |
+          python src/data_generation/generate_data.py \
+              --start 2024-01-01 --end 2024-01-14 --customers 1000 --out /tmp/ci_data
+          python src/database/load_data.py --data-dir /tmp/ci_data
+          python - <<'EOF'
+          import sqlite3
+          conn = sqlite3.connect("data/processed/airline.db")
+          conn.executescript(open("src/database/views.sql").read())
+          conn.commit()
+          EOF
+          python src/data_quality/quality_checks.py --db data/processed/airline.db
+          python src/ml/delay_prediction.py --db data/processed/airline.db
+          python src/ml/customer_segmentation.py --db data/processed/airline.db
+          python src/ml/demand_forecasting.py --db data/processed/airline.db --horizon 3
+          python src/ml/route_economics.py --db data/processed/airline.db
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -t airline-intelligence-api:ci .
