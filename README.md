@@ -42,5 +42,133 @@ pip install -r requirments.txt
 # 2. Generate the simulated dataset (reproducible, ~15s for 3 months of data)
 python src/data_generation/generate_data.py --start 2024-01-01 --end 2024-03-31 --customers 15000
 
+# 3. Load it into a local SQLite warehouse (no Postgres install required)
+python src/database/load_data.py --data-dir data/synthetic
+python -c "import sqlite3; c=sqlite3.connect('data/processed/airline.db'); c.executescript(open('src/database/views.sql').read()); c.commit()"
+
+# 4. Run the analytics & ML layers
+
+# 5. (Optional) Serve the API
+uvicorn src.api.main:app --reload --port 8000
+# then open http://localhost:8000/docs
 ```
 
+
+## Dashboard
+
+The executive dashboard (`src/dashboard/app.py`) is built on **Streamlit +
+Plotly** — open source, free, scriptable, and containerized. It has
+four tabs, all reading from the same clean warehouse views the SQL/ML layers
+use:
+
+- **Route profitability** — revenue vs. cost bar chart, adjustable top-N, and an automatically flagged bottom-quartile-margin table
+- **Operations** — on-time performance by route, average delay trend over time
+- **Customers** — frequency vs. monetary scatter (RFM), pointing to the full segmentation model
+- **Data quality** — quality score trend over time, open issue log
+
+## Sample results
+
+*(from a real run of this codebase on the generated 3-month / ~760K-booking sample dataset — regenerate anytime with the commands above; exact numbers will vary slightly by date range/seed.)*
+
+**Data quality**
+
+```
+Dataset: fact_flights      | Total: 4,935   | Valid: 4,924   | Score: 99.78%
+  - capacity_violation         7  (0.14%)
+  - invalid_airport_code       4  (0.08%)
+
+Dataset: fact_bookings     | Total: 767,079 | Valid: 760,224 | Score: 99.11%
+  - duplicate_booking      3,056  (0.40%)
+  - missing_customer_id    2,301  (0.30%)
+  - invalid_fare           1,534  (0.20%)
+```
+
+**Route profitability (top 5 by contribution)**
+
+| Route   | Flights | Revenue    | Cost      | Contribution | Margin |
+| ------- | ------: | ---------: | --------: | -----------: | -----: |
+| NBO-JFK |      91 | $23.8M     | $10.7M    | $13.1M        | 55.0%  |
+| JFK-NBO |      91 | $22.9M     | $10.3M    | $12.6M        | 55.1%  |
+| NBO-LOS |     183 | $17.6M     | $8.0M     | $9.6M         | 54.5%  |
+| LHR-NBO |      91 | $15.2M     | $6.8M     | $8.5M         | 55.6%  |
+| LOS-NBO |     174 | $15.2M     | $7.2M     | $8.0M         | 52.5%  |
+
+Short high-frequency regional routes (NBO-KIS, NBO-MBA) come out structurally thinner-margin (46–51%) than long-haul, once fixed ground-ops overhead is accounted for per flight — flagged automatically as the bottom quartile by margin for capacity/fare review.
+
+**Flight delay risk model** — 3 algorithms compared with a leakage-safe feature set (no feature is computed using information not available before departure):
+
+| Model              | ROC-AUC | Precision (delayed) | Recall (delayed) |
+| ------------------- | ------: | -------------------: | -----------------: |
+| Random Forest        |   0.726 |                 0.260 |               0.352 |
+| Gradient Boosting     |   0.726 |                 0.600 |               0.085 |
+| Logistic Regression  |   0.707 |                 0.136 |               0.634 |
+
+**Customer segmentation** (RFM + K-Means, k=4, log-transformed features):
+
+| Segment                 | Customers | Avg spend | Avg trips | Avg recency |
+| ------------------------ | --------: | --------: | --------: | ----------: |
+| Business Frequent Flyer  |     2,264 |   $90,569 |     161.5 |        1 day |
+| Regular Traveller (A)    |     7,969 |   $14,997 |      40.2 |       3 days |
+| Regular Traveller (B)    |     3,902 |    $3,609 |      13.9 |       6 days |
+| Inactive / At-Risk       |       865 |    $2,830 |      10.7 |      22 days |
+
+**Demand forecasting** — a gradient-boosted regression on lag/calendar features beat every classical baseline in a proper time-series backtest (train-on-past, predict-the-future — never a random split):
+
+| Model              |   MAE | MAPE |
+| ------------------- | ----: | ---: |
+| Gradient Boosting    | 484.0 | 6.4% |
+| Naive (yesterday)    | 537.2 | 7.1% |
+| Seasonal naive        | 548.8 | 7.3% |
+| 7-day moving average  | 568.1 | 7.6% |
+
+**Price elasticity of demand** (log-log OLS, economy cabin, month fixed effects):
+
+> A 10% increase in average economy fare is associated with a **5.5% decrease** in daily bookings, holding seasonality constant (estimated elasticity ≈ **-0.55**, R² = 0.74).
+
+---
+
+## Project structure
+
+```
+airline-intelligence-platform/
+├── data/
+│   ├── synthetic/            # generated CSVs (gitignored — regenerate via the script)
+│   ├── processed/            # local SQLite warehouse (gitignored)
+│   └── raw/                  # placeholder for future real/public source data
+├── src/
+│   ├── data_generation/      # synthetic data generator
+│   ├── database/             # star-schema DDL, clean views, loader (SQLite/Postgres)
+│   ├── data_quality/         # completeness/validity/uniqueness checks + issue log
+│   ├── analytics/            # hand-written analytical SQL (CTEs, window functions)
+│   ├── ml/                   # forecasting, delay classification, segmentation, econometrics
+│   ├── dashboard/            # Streamlit executive dashboard (open-source BI layer)
+│   └── api/                  # FastAPI data product
+├── tests/                    # pytest suite
+├── docs/                     # architecture notes, git workflow guide, Power BI guide
+├── .github/workflows/ci.yml  # lint + test + pipeline smoke test on every push
+├── docker-compose.yml         # Postgres + pgAdmin + API + dashboard, one command
+├── Dockerfile                 # API service image
+├── Dockerfile.dashboard       # Dashboard service image
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Testing
+
+```bash
+pytest tests/ -v --cov=src --cov-report=term-missing
+```
+
+Tests cover: generator determinism (same seed ⇒ identical output), referential integrity between generated tables, and — importantly — that the data-quality checks actually detect the issues the generator deliberately injects (a data-quality suite that reports 100% on data known to be dirty is worse than no suite at all).
+
+CI (`.github/workflows/ci.yml`) runs the full test suite **and** a smoke test of the entire pipeline (generate → load → quality-check → all four ML models) on every push, plus a Docker build of the API image.
+
+---
+
+
+
+## License
+
+MIT — see [LICENSE](LICENSE).
